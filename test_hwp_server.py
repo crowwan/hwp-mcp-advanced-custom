@@ -12,6 +12,35 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def cleanup_test_files():
+    """테스트 후 생성된 파일 정리"""
+    try:
+        from advanced_hwp_server import hwp_controller, close_all_documents
+        
+        # 모든 문서 닫기 (저장 안함)
+        if hwp_controller.is_initialized:
+            close_all_documents(save_changes=False)
+        
+        # 테스트 파일 삭제
+        test_files = [
+            os.path.join(os.getcwd(), "test_document.hwp"),
+            os.path.join(os.getcwd(), "test_output.txt")
+        ]
+        
+        for f in test_files:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                    logger.info(f"테스트 파일 삭제: {f}")
+                except:
+                    pass
+        
+        logger.info("테스트 정리 완료")
+        
+    except Exception as e:
+        logger.warning(f"테스트 정리 중 오류 (무시됨): {e}")
+
+
 def test_hwp_server():
     """HWP 서버 기능 테스트"""
     
@@ -171,34 +200,130 @@ def test_mcp_tools():
         logger.error(f"❌ MCP 도구 테스트 실패: {e}")
         return False
 
+
+def test_text_reading():
+    """텍스트 읽기 기능 테스트"""
+    
+    try:
+        logger.info("=== 텍스트 읽기 기능 테스트 시작 ===")
+        
+        # 서버 모듈 임포트
+        from advanced_hwp_server import (
+            initialize_hwp, create_document, insert_text,
+            get_text_all, get_paragraph_text, get_selected_text, save_as_text
+        )
+        
+        # 1. 초기화 및 문서 생성
+        logger.info("1. 초기화 및 문서 생성")
+        initialize_hwp()
+        create_document()
+        
+        # 2. 테스트용 텍스트 삽입
+        logger.info("2. 테스트용 텍스트 삽입")
+        test_text = """첫 번째 문단입니다. 이것은 텍스트 읽기 기능 테스트를 위한 내용입니다.
+두 번째 문단입니다. Advanced HWP MCP Server의 새로운 기능을 테스트합니다.
+세 번째 문단입니다. 텍스트 읽기, 페이지별 읽기, 문단별 읽기 기능을 확인합니다."""
+        insert_text(test_text)
+        logger.info("✅ 테스트 텍스트 삽입 완료")
+        
+        # 3. 전체 텍스트 읽기 테스트
+        logger.info("3. 전체 텍스트 읽기 테스트")
+        result = get_text_all()
+        if "텍스트 읽기 실패" not in result:
+            logger.info(f"✅ 전체 텍스트 읽기 성공")
+            logger.info(f"   읽은 내용 (앞 100자): {result[:100]}...")
+        else:
+            logger.error(f"❌ 전체 텍스트 읽기 실패: {result}")
+            return False
+        
+        # 4. 문단별 텍스트 읽기 테스트
+        logger.info("4. 문단별 텍스트 읽기 테스트")
+        result = get_paragraph_text(0)
+        if "문단 텍스트 읽기 실패" not in result:
+            logger.info(f"✅ 첫 번째 문단 읽기 성공")
+            logger.info(f"   읽은 내용: {result[:50]}...")
+        else:
+            logger.error(f"❌ 문단 텍스트 읽기 실패: {result}")
+            return False
+        
+        # 5. 텍스트 파일로 저장 테스트
+        logger.info("5. 텍스트 파일로 저장 테스트")
+        test_txt_path = os.path.join(os.getcwd(), "test_output.txt")
+        result = save_as_text(test_txt_path)
+        if "텍스트 저장 실패" not in result:
+            logger.info(f"✅ 텍스트 파일 저장 성공: {test_txt_path}")
+            # 저장된 파일 확인 (한글은 cp949로 저장될 수 있음)
+            if os.path.exists(test_txt_path):
+                try:
+                    with open(test_txt_path, 'r', encoding='utf-8') as f:
+                        saved_content = f.read()
+                except UnicodeDecodeError:
+                    with open(test_txt_path, 'r', encoding='cp949') as f:
+                        saved_content = f.read()
+                logger.info(f"   저장된 내용 (앞 50자): {saved_content[:50]}...")
+        else:
+            logger.error(f"❌ 텍스트 파일 저장 실패: {result}")
+            return False
+        
+        logger.info("=== 텍스트 읽기 기능 테스트 완료 ===")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ 텍스트 읽기 테스트 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     """메인 테스트 함수"""
     
     logger.info("Advanced HWP MCP Server 통합 테스트")
     logger.info("=" * 50)
     
-    # 1. 기본 HWP 기능 테스트
-    if test_hwp_server():
-        logger.info("✅ 기본 HWP 기능 테스트 통과")
-    else:
-        logger.error("❌ 기본 HWP 기능 테스트 실패")
-        return False
+    success = True
     
-    # 잠시 대기
-    time.sleep(2)
+    try:
+        # 1. 기본 HWP 기능 테스트
+        if test_hwp_server():
+            logger.info("✅ 기본 HWP 기능 테스트 통과")
+        else:
+            logger.error("❌ 기본 HWP 기능 테스트 실패")
+            success = False
+        
+        # 잠시 대기
+        time.sleep(2)
+        
+        # 2. MCP 도구 기능 테스트
+        if test_mcp_tools():
+            logger.info("✅ MCP 도구 기능 테스트 통과")
+        else:
+            logger.error("❌ MCP 도구 기능 테스트 실패")
+            success = False
+        
+        # 잠시 대기
+        time.sleep(2)
+        
+        # 3. 텍스트 읽기 기능 테스트
+        if test_text_reading():
+            logger.info("✅ 텍스트 읽기 기능 테스트 통과")
+        else:
+            logger.error("❌ 텍스트 읽기 기능 테스트 실패")
+            success = False
     
-    # 2. MCP 도구 기능 테스트
-    if test_mcp_tools():
-        logger.info("✅ MCP 도구 기능 테스트 통과")
-    else:
-        logger.error("❌ MCP 도구 기능 테스트 실패")
-        return False
+    finally:
+        # 테스트 후 정리
+        logger.info("=" * 50)
+        logger.info("테스트 정리 중...")
+        cleanup_test_files()
     
     logger.info("=" * 50)
-    logger.info("🎉 모든 테스트가 성공적으로 완료되었습니다!")
-    logger.info("Advanced HWP MCP Server가 정상적으로 작동합니다.")
+    if success:
+        logger.info("🎉 모든 테스트가 성공적으로 완료되었습니다!")
+        logger.info("Advanced HWP MCP Server가 정상적으로 작동합니다.")
+    else:
+        logger.error("일부 테스트가 실패했습니다.")
     
-    return True
+    return success
 
 if __name__ == "__main__":
     success = main()

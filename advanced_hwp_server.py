@@ -17,18 +17,18 @@ try:
     import win32api
     import win32con
 except ImportError as e:
-    print(f"필수 패키지가 설치되지 않음: {e}")
-    print("다음 명령어로 패키지를 설치하세요:")
-    print("pip install mcp fastmcp pywin32")
+    print(f"필수 패키지가 설치되지 않음: {e}", file=sys.stderr)
+    print("다음 명령어로 패키지를 설치하세요:", file=sys.stderr)
+    print("pip install mcp fastmcp pywin32", file=sys.stderr)
     sys.exit(1)
 
-# 로깅 설정
+# 로깅 설정 - MCP는 stdout을 JSON-RPC로 사용하므로 stderr로만 출력
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('hwp_mcp.log'),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stderr)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -125,15 +125,29 @@ def open_document(file_path: str) -> str:
         if not os.path.exists(file_path):
             return f"파일을 찾을 수 없습니다: {file_path}"
         
-        # 문서 열기
-        act = hwp_controller.hwp.CreateAction("FileOpen")
-        pset = act.CreateSet()
-        pset.SetItem("filename", file_path)
-        act.Execute(pset)
+        # 보안 모듈 등록 (DRM 문서 열기 위해 필요)
+        try:
+            hwp_controller.hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")
+        except:
+            pass
         
-        hwp_controller.current_document = file_path
-        logger.info(f"문서 열기 완료: {file_path}")
-        return f"문서를 열었습니다: {file_path}"
+        # 문서 열기 - Open 메서드 사용
+        result = hwp_controller.hwp.Open(file_path, "HWP", "forceopen:true")
+        
+        if result:
+            hwp_controller.current_document = file_path
+            logger.info(f"문서 열기 완료: {file_path}")
+            return f"문서를 열었습니다: {file_path}"
+        else:
+            # 대체 방법 시도 - HAction.Run 사용
+            hwp_controller.hwp.HAction.GetDefault("FileOpen", hwp_controller.hwp.HParameterSet.HFileOpenSave.HSet)
+            hwp_controller.hwp.HParameterSet.HFileOpenSave.filename = file_path
+            hwp_controller.hwp.HParameterSet.HFileOpenSave.Format = "HWP"
+            hwp_controller.hwp.HAction.Execute("FileOpen", hwp_controller.hwp.HParameterSet.HFileOpenSave.HSet)
+            
+            hwp_controller.current_document = file_path
+            logger.info(f"문서 열기 완료 (대체방법): {file_path}")
+            return f"문서를 열었습니다: {file_path}"
         
     except Exception as e:
         logger.error(f"문서 열기 실패: {e}")
@@ -165,6 +179,82 @@ def save_document(file_path: Optional[str] = None) -> str:
     except Exception as e:
         logger.error(f"문서 저장 실패: {e}")
         return f"문서 저장 실패: {e}"
+
+@mcp.tool()
+def close_document(save_changes: bool = False) -> str:
+    """현재 문서를 닫습니다."""
+    try:
+        hwp_controller.check_initialization()
+        
+        if save_changes:
+            # 변경사항 저장 후 닫기
+            hwp_controller.hwp.HAction.Run("FileSave")
+        
+        # 문서 닫기 (저장 여부 묻지 않고 닫기)
+        hwp_controller.hwp.HAction.Run("FileClose")
+        hwp_controller.current_document = None
+        
+        logger.info("문서 닫기 완료")
+        return "문서를 닫았습니다."
+        
+    except Exception as e:
+        logger.error(f"문서 닫기 실패: {e}")
+        return f"문서 닫기 실패: {e}"
+
+@mcp.tool()
+def close_all_documents(save_changes: bool = False) -> str:
+    """모든 문서를 닫습니다."""
+    try:
+        hwp_controller.check_initialization()
+        
+        closed_count = 0
+        max_attempts = 100  # 무한 루프 방지
+        
+        # 모든 문서 닫기
+        for _ in range(max_attempts):
+            try:
+                # 현재 문서가 있는지 확인
+                if hwp_controller.hwp.XHwpDocuments.Count == 0:
+                    break
+                
+                if save_changes:
+                    hwp_controller.hwp.HAction.Run("FileSave")
+                
+                # 저장 여부 묻지 않고 닫기
+                hwp_controller.hwp.XHwpDocuments.Item(0).SetModified(False)
+                hwp_controller.hwp.HAction.Run("FileClose")
+                closed_count += 1
+            except Exception as e:
+                logger.warning(f"문서 닫기 중 오류: {e}")
+                break
+        
+        hwp_controller.current_document = None
+        
+        logger.info(f"모든 문서 닫기 완료: {closed_count}개")
+        return f"모든 문서를 닫았습니다. ({closed_count}개)"
+        
+    except Exception as e:
+        logger.error(f"모든 문서 닫기 실패: {e}")
+        return f"모든 문서 닫기 실패: {e}"
+
+@mcp.tool()
+def quit_hwp() -> str:
+    """한글 프로그램을 종료합니다."""
+    try:
+        hwp_controller.check_initialization()
+        
+        # 한글 종료
+        hwp_controller.hwp.Quit()
+        hwp_controller.hwp = None
+        hwp_controller.is_initialized = False
+        hwp_controller.current_document = None
+        
+        logger.info("한글 프로그램 종료 완료")
+        return "한글 프로그램을 종료했습니다."
+        
+    except Exception as e:
+        logger.error(f"한글 종료 실패: {e}")
+        return f"한글 종료 실패: {e}"
 
 @mcp.tool()
 def insert_text(text: str, position: str = "current") -> str:
@@ -657,17 +747,126 @@ def export_to_pdf(output_path: str) -> str:
         logger.error(f"PDF 내보내기 실패: {e}")
         return f"PDF 내보내기 실패: {e}"
 
+@mcp.tool()
+def get_text_all() -> str:
+    """문서 전체의 텍스트를 읽어옵니다."""
+    try:
+        hwp_controller.check_initialization()
+        
+        # 전체 선택
+        hwp_controller.hwp.HAction.Run("SelectAll")
+        
+        # 선택된 텍스트 가져오기
+        text = hwp_controller.hwp.GetTextFile("TEXT", "")
+        
+        # 선택 해제 (문서 처음으로 이동)
+        hwp_controller.hwp.HAction.Run("MoveDocBegin")
+        
+        logger.info(f"전체 텍스트 읽기 완료: {len(text)} 글자")
+        return text
+        
+    except Exception as e:
+        logger.error(f"텍스트 읽기 실패: {e}")
+        return f"텍스트 읽기 실패: {e}"
+
+@mcp.tool()
+def get_text_by_page(page_number: int) -> str:
+    """특정 페이지의 텍스트를 읽어옵니다."""
+    try:
+        hwp_controller.check_initialization()
+        
+        # 해당 페이지로 이동
+        hwp_controller.hwp.HAction.GetDefault("Goto", hwp_controller.hwp.HParameterSet.HGotoE.HSet)
+        hwp_controller.hwp.HParameterSet.HGotoE.HSet.SetItem("DialogResult", page_number)
+        hwp_controller.hwp.HParameterSet.HGotoE.SetItem("PageNumber", page_number)
+        hwp_controller.hwp.HAction.Execute("Goto", hwp_controller.hwp.HParameterSet.HGotoE.HSet)
+        
+        # 페이지 시작으로 이동
+        hwp_controller.hwp.HAction.Run("MovePageBegin")
+        
+        # 페이지 끝까지 선택
+        hwp_controller.hwp.HAction.Run("MoveSelPageDown")
+        
+        # 선택된 텍스트 가져오기
+        text = hwp_controller.hwp.GetTextFile("TEXT", "")
+        
+        # 선택 해제
+        hwp_controller.hwp.HAction.Run("Cancel")
+        
+        logger.info(f"{page_number}페이지 텍스트 읽기 완료")
+        return text
+        
+    except Exception as e:
+        logger.error(f"페이지 텍스트 읽기 실패: {e}")
+        return f"페이지 텍스트 읽기 실패: {e}"
+
+@mcp.tool()
+def get_selected_text() -> str:
+    """현재 선택된 텍스트를 읽어옵니다."""
+    try:
+        hwp_controller.check_initialization()
+        
+        # 선택된 텍스트 가져오기
+        text = hwp_controller.hwp.GetTextFile("TEXT", "")
+        
+        logger.info(f"선택된 텍스트 읽기 완료: {len(text)} 글자")
+        return text
+        
+    except Exception as e:
+        logger.error(f"선택된 텍스트 읽기 실패: {e}")
+        return f"선택된 텍스트 읽기 실패: {e}"
+
+@mcp.tool()
+def get_paragraph_text(paragraph_index: int = 0) -> str:
+    """특정 문단의 텍스트를 읽어옵니다. (0부터 시작)"""
+    try:
+        hwp_controller.check_initialization()
+        
+        # 문서 처음으로 이동
+        hwp_controller.hwp.HAction.Run("MoveDocBegin")
+        
+        # 지정된 문단으로 이동
+        for _ in range(paragraph_index):
+            hwp_controller.hwp.HAction.Run("MoveParaDown")
+        
+        # 문단 선택
+        hwp_controller.hwp.HAction.Run("MoveSelParaDown")
+        
+        # 선택된 텍스트 가져오기
+        text = hwp_controller.hwp.GetTextFile("TEXT", "")
+        
+        # 선택 해제
+        hwp_controller.hwp.HAction.Run("Cancel")
+        
+        logger.info(f"{paragraph_index}번째 문단 텍스트 읽기 완료")
+        return text.strip()
+        
+    except Exception as e:
+        logger.error(f"문단 텍스트 읽기 실패: {e}")
+        return f"문단 텍스트 읽기 실패: {e}"
+
+@mcp.tool()
+def save_as_text(output_path: str) -> str:
+    """문서 전체를 텍스트 파일로 저장합니다."""
+    try:
+        hwp_controller.check_initialization()
+        
+        # 텍스트 파일로 저장
+        hwp_controller.hwp.SaveAs(output_path, "TEXT")
+        
+        logger.info(f"텍스트 파일로 저장 완료: {output_path}")
+        return f"텍스트 파일로 저장했습니다: {output_path}"
+        
+    except Exception as e:
+        logger.error(f"텍스트 저장 실패: {e}")
+        return f"텍스트 저장 실패: {e}"
+
 def main():
     """메인 함수"""
     try:
         logger.info("Advanced HWP MCP Server 시작")
         
-        # 한글 프로그램 초기화
-        if not hwp_controller.initialize():
-            logger.error("한글 프로그램 초기화 실패")
-            return
-        
-        # MCP 서버 실행
+        # MCP 서버 실행 (한글 초기화는 첫 도구 호출 시 수행)
         mcp.run()
         
     except Exception as e:
