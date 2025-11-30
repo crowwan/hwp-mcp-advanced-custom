@@ -16,6 +16,9 @@ try:
     import pythoncom
     import win32api
     import win32con
+    import win32gui
+    import win32process
+    import ctypes
 except ImportError as e:
     print(f"필수 패키지가 설치되지 않음: {e}", file=sys.stderr)
     print("다음 명령어로 패키지를 설치하세요:", file=sys.stderr)
@@ -98,6 +101,360 @@ def initialize_hwp() -> str:
     except Exception as e:
         logger.error(f"초기화 중 오류: {e}")
         return f"초기화 실패: {e}"
+
+@mcp.tool()
+def get_running_hwp_documents() -> str:
+    """실행 중인 한글에서 열린 문서 목록을 조회합니다."""
+    try:
+        pythoncom.CoInitialize()
+        
+        hwp = None
+        
+        # 1. 이미 연결된 컨트롤러가 있으면 사용
+        if hwp_controller.is_initialized and hwp_controller.hwp:
+            hwp = hwp_controller.hwp
+        else:
+            # 2. GetActiveObject 시도
+            try:
+                hwp = win32com.client.GetActiveObject("HWPFrame.HwpObject")
+            except:
+                pass
+            
+            # 3. GetActiveObject 실패 시 Dispatch로 연결 시도 (실행 중인 인스턴스에 연결)
+            if hwp is None:
+                try:
+                    hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
+                    # Dispatch는 새 인스턴스를 만들 수 있으므로 문서가 없으면 실행 중이 아님
+                    if hwp.XHwpDocuments.Count == 0:
+                        return "실행 중인 한글 프로그램이 없습니다. initialize_hwp()로 시작하세요."
+                except:
+                    return "실행 중인 한글 프로그램이 없습니다. initialize_hwp()로 시작하세요."
+        
+        # 열린 문서 목록 가져오기
+        doc_count = hwp.XHwpDocuments.Count
+        if doc_count == 0:
+            return "한글이 실행 중이지만 열린 문서가 없습니다."
+        
+        documents = []
+        for i in range(doc_count):
+            doc = hwp.XHwpDocuments.Item(i)
+            doc_path = doc.Path if doc.Path else "(새 문서)"
+            doc_name = doc.Path.split("\\")[-1] if doc.Path else f"새 문서 {i+1}"
+            documents.append({
+                "index": i,
+                "name": doc_name,
+                "path": doc_path
+            })
+        
+        result = f"현재 연결된 한글에서 열린 문서 ({doc_count}개):\n"
+        for doc in documents:
+            result += f"  [{doc['index']}] {doc['name']}\n"
+            result += f"      경로: {doc['path']}\n"
+        
+        # 여러 한글 프로세스 확인 안내
+        try:
+            import subprocess
+            result_proc = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq Hwp.exe', '/FO', 'CSV', '/NH'], 
+                                        capture_output=True, text=True)
+            hwp_count = len([line for line in result_proc.stdout.strip().split('\n') if 'Hwp.exe' in line])
+            if hwp_count > 1:
+                result += f"\n⚠️ 주의: 한글 프로그램이 {hwp_count}개 실행 중입니다.\n"
+                result += "   다른 인스턴스에 연결하려면 list_all_hwp_windows()를 호출하세요."
+        except:
+            pass
+        
+        logger.info(f"열린 문서 목록 조회 완료: {doc_count}개")
+        return result
+        
+    except Exception as e:
+        logger.error(f"문서 목록 조회 실패: {e}")
+        return f"문서 목록 조회 실패: {e}"
+
+@mcp.tool()
+def list_all_hwp_windows() -> str:
+    """실행 중인 모든 한글 창 목록을 조회합니다. (창 제목으로 파일명 확인)"""
+    try:
+        hwp_windows = []
+        
+        def enum_windows_callback(hwnd, results):
+            if win32gui.IsWindowVisible(hwnd):
+                window_text = win32gui.GetWindowText(hwnd)
+                class_name = win32gui.GetClassName(hwnd)
+                
+                # 한글 창 확인 (HwpFrame 클래스 또는 창 제목에 "한글" 포함)
+                if 'Hwp' in class_name or '한글' in window_text or window_text.endswith('.hwp'):
+                    # 프로세스 ID 가져오기
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    results.append({
+                        'hwnd': hwnd,
+                        'title': window_text,
+                        'class': class_name,
+                        'pid': pid
+                    })
+            return True
+        
+        win32gui.EnumWindows(enum_windows_callback, hwp_windows)
+        
+        if not hwp_windows:
+            return "실행 중인 한글 창을 찾을 수 없습니다."
+        
+        result = f"실행 중인 한글 창 ({len(hwp_windows)}개):\n"
+        for i, win in enumerate(hwp_windows):
+            result += f"  [{i}] {win['title']}\n"
+            result += f"      PID: {win['pid']}, HWND: {win['hwnd']}\n"
+        
+        result += "\n특정 창에 연결하려면 connect_to_hwp_window(파일명 일부)를 호출하세요."
+        
+        logger.info(f"한글 창 목록 조회: {len(hwp_windows)}개")
+        return result
+        
+    except Exception as e:
+        logger.error(f"한글 창 목록 조회 실패: {e}")
+        return f"한글 창 목록 조회 실패: {e}"
+
+@mcp.tool()
+def connect_to_hwp_window(search_text: str) -> str:
+    """특정 파일명이 포함된 한글 창을 활성화하고 연결합니다."""
+    try:
+        pythoncom.CoInitialize()
+        
+        hwp_windows = []
+        
+        def enum_windows_callback(hwnd, results):
+            if win32gui.IsWindowVisible(hwnd):
+                window_text = win32gui.GetWindowText(hwnd)
+                class_name = win32gui.GetClassName(hwnd)
+                
+                if 'Hwp' in class_name or '한글' in window_text or window_text.endswith('.hwp'):
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    results.append({
+                        'hwnd': hwnd,
+                        'title': window_text,
+                        'class': class_name,
+                        'pid': pid
+                    })
+            return True
+        
+        win32gui.EnumWindows(enum_windows_callback, hwp_windows)
+        
+        if not hwp_windows:
+            return "실행 중인 한글 창을 찾을 수 없습니다."
+        
+        # 검색어가 포함된 창 찾기
+        target_window = None
+        for win in hwp_windows:
+            if search_text.lower() in win['title'].lower():
+                target_window = win
+                break
+        
+        if target_window is None:
+            titles = [w['title'] for w in hwp_windows]
+            return f"'{search_text}'이(가) 포함된 창을 찾을 수 없습니다.\n실행 중인 창: {titles}"
+        
+        # 해당 창 활성화 (포그라운드로 가져오기)
+        hwnd = target_window['hwnd']
+        
+        # 창이 최소화되어 있으면 복원
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        
+        # 창을 포그라운드로 - 여러 방법 시도
+        try:
+            # 방법 1: SetForegroundWindow
+            win32gui.SetForegroundWindow(hwnd)
+        except:
+            try:
+                # 방법 2: BringWindowToTop
+                win32gui.BringWindowToTop(hwnd)
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            except:
+                # 방법 3: SetActiveWindow (fallback)
+                pass
+        
+        # 잠시 대기 후 COM 연결
+        import time
+        time.sleep(0.3)
+        
+        # COM 연결 시도
+        try:
+            hwp_controller.hwp = win32com.client.GetActiveObject("HWPFrame.HwpObject")
+        except:
+            hwp_controller.hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
+        
+        hwp_controller.is_initialized = True
+        
+        # 현재 문서 정보
+        doc_count = hwp_controller.hwp.XHwpDocuments.Count
+        if doc_count > 0:
+            current_doc = hwp_controller.hwp.XHwpDocuments.Item(0)
+            hwp_controller.current_document = current_doc.Path if current_doc.Path else "새 문서"
+        
+        logger.info(f"한글 창 연결 완료: {target_window['title']}")
+        return f"'{target_window['title']}' 창에 연결되었습니다. (열린 문서: {doc_count}개)"
+        
+    except Exception as e:
+        logger.error(f"한글 창 연결 실패: {e}")
+        return f"한글 창 연결 실패: {e}"
+
+@mcp.tool()
+def connect_to_running_hwp() -> str:
+    """이미 실행 중인 한글 프로그램에 연결합니다."""
+    try:
+        pythoncom.CoInitialize()
+        
+        hwp = None
+        
+        # 1. GetActiveObject 시도
+        try:
+            hwp = win32com.client.GetActiveObject("HWPFrame.HwpObject")
+        except:
+            pass
+        
+        # 2. GetActiveObject 실패 시 Dispatch로 연결 시도
+        if hwp is None:
+            try:
+                hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
+                # 문서가 없으면 새로 실행된 것이므로 컨트롤러에 저장
+                if hwp.XHwpDocuments.Count == 0:
+                    hwp_controller.hwp = hwp
+                    hwp_controller.is_initialized = True
+                    return "실행 중인 한글이 없어 새로 시작했습니다. (열린 문서: 0개)"
+            except Exception as e:
+                return f"한글 연결 실패: {e}"
+        
+        hwp_controller.hwp = hwp
+        hwp_controller.is_initialized = True
+        
+        # 현재 문서 정보 가져오기
+        doc_count = hwp_controller.hwp.XHwpDocuments.Count
+        if doc_count > 0:
+            current_doc = hwp_controller.hwp.XHwpDocuments.Item(0)
+            hwp_controller.current_document = current_doc.Path if current_doc.Path else "새 문서"
+        
+        logger.info("실행 중인 한글에 연결 완료")
+        return f"실행 중인 한글에 연결되었습니다. (열린 문서: {doc_count}개)"
+        
+    except Exception as e:
+        logger.error(f"한글 연결 실패: {e}")
+        return f"한글 연결 실패: {e}"
+
+@mcp.tool()
+def switch_to_document(file_name: str) -> str:
+    """열린 문서 중 특정 파일로 전환합니다. 파일명 일부만 입력해도 됩니다."""
+    try:
+        pythoncom.CoInitialize()
+        
+        hwp = None
+        
+        # 1. 이미 연결된 컨트롤러가 있으면 사용
+        if hwp_controller.is_initialized and hwp_controller.hwp:
+            hwp = hwp_controller.hwp
+        else:
+            # 2. GetActiveObject 시도
+            try:
+                hwp = win32com.client.GetActiveObject("HWPFrame.HwpObject")
+            except:
+                pass
+            
+            # 3. Dispatch로 연결 시도
+            if hwp is None:
+                try:
+                    hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
+                    if hwp.XHwpDocuments.Count == 0:
+                        return "실행 중인 한글 프로그램이 없습니다."
+                except:
+                    return "실행 중인 한글 프로그램이 없습니다."
+        
+        # 열린 문서에서 검색
+        doc_count = hwp.XHwpDocuments.Count
+        if doc_count == 0:
+            return "열린 문서가 없습니다."
+        
+        found_doc = None
+        found_index = -1
+        
+        for i in range(doc_count):
+            doc = hwp.XHwpDocuments.Item(i)
+            doc_path = doc.Path if doc.Path else ""
+            doc_name = doc_path.split("\\")[-1] if doc_path else f"새 문서 {i+1}"
+            
+            # 파일명에 검색어가 포함되어 있는지 확인 (대소문자 무시)
+            if file_name.lower() in doc_name.lower() or file_name.lower() in doc_path.lower():
+                found_doc = doc
+                found_index = i
+                break
+        
+        if found_doc is None:
+            return f"'{file_name}'이(가) 포함된 문서를 찾을 수 없습니다."
+        
+        # 해당 문서로 전환
+        hwp.XHwpDocuments.Item(found_index).SetActive()
+        
+        # 컨트롤러 업데이트
+        hwp_controller.hwp = hwp
+        hwp_controller.is_initialized = True
+        hwp_controller.current_document = found_doc.Path
+        
+        doc_name = found_doc.Path.split("\\")[-1] if found_doc.Path else f"새 문서"
+        logger.info(f"문서 전환 완료: {doc_name}")
+        return f"'{doc_name}' 문서로 전환했습니다."
+        
+    except Exception as e:
+        logger.error(f"문서 전환 실패: {e}")
+        return f"문서 전환 실패: {e}"
+
+@mcp.tool()
+def get_active_document_info() -> str:
+    """현재 활성화된 문서의 정보를 조회합니다."""
+    try:
+        pythoncom.CoInitialize()
+        
+        hwp = None
+        
+        # 1. 이미 연결된 컨트롤러가 있으면 사용
+        if hwp_controller.is_initialized and hwp_controller.hwp:
+            hwp = hwp_controller.hwp
+        else:
+            # 2. GetActiveObject 시도
+            try:
+                hwp = win32com.client.GetActiveObject("HWPFrame.HwpObject")
+            except:
+                pass
+            
+            # 3. Dispatch로 연결 시도
+            if hwp is None:
+                try:
+                    hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
+                    if hwp.XHwpDocuments.Count == 0:
+                        return "실행 중인 한글 프로그램이 없습니다."
+                except:
+                    return "실행 중인 한글 프로그램이 없습니다."
+        
+        doc_count = hwp.XHwpDocuments.Count
+        if doc_count == 0:
+            return "열린 문서가 없습니다."
+        
+        # 현재 활성 문서 정보
+        # XHwpDocuments.Item(0)이 현재 활성 문서
+        active_doc = hwp.XHwpDocuments.Item(0)
+        doc_path = active_doc.Path if active_doc.Path else "(새 문서 - 저장되지 않음)"
+        doc_name = doc_path.split("\\")[-1] if active_doc.Path else "새 문서"
+        
+        # 페이지 수
+        page_count = hwp.PageCount
+        
+        result = f"""현재 활성 문서 정보:
+- 파일명: {doc_name}
+- 경로: {doc_path}
+- 페이지 수: {page_count}
+- 총 열린 문서 수: {doc_count}개"""
+        
+        logger.info(f"활성 문서 정보 조회: {doc_name}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"문서 정보 조회 실패: {e}")
+        return f"문서 정보 조회 실패: {e}"
 
 @mcp.tool()
 def create_document() -> str:
