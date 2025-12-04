@@ -53,22 +53,61 @@ class AdvancedHwpController:
         """한글 COM 객체 초기화"""
         try:
             pythoncom.CoInitialize()
-            
+
             # 한글 프로그램이 설치되어 있는지 확인
             try:
                 self.hwp = win32com.client.gencache.EnsureDispatch("HWPFrame.HwpObject")
             except:
                 # gencache가 실패하면 일반 Dispatch 사용
                 self.hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
-            
+
+            # ===== 자동화 모드 설정: 모든 확인 대화상자 자동 승인 =====
+
+            # 1. 파일 경로 체크 대화상자 비활성화
+            try:
+                self.hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")
+            except:
+                pass
+
+            # 2. 보안 경고 대화상자 비활성화
+            try:
+                self.hwp.RegisterModule("SecurityModule", "")
+            except:
+                pass
+
+            # 3. 개인정보 보호 기능 비활성화 (대화상자 방지)
+            try:
+                self.hwp.SetPrivateInfoProtection(0)
+            except:
+                pass
+
+            # 4. 메시지 박스 자동 응답 설정 (모든 확인창 자동 Yes)
+            try:
+                # MessageBoxMode: 0=자동응답, 1=대화상자표시
+                self.hwp.MessageBoxMode = 0
+            except:
+                pass
+
+            # 5. 편집 모드를 자동화 모드로 설정
+            try:
+                self.hwp.EditMode = 1  # 1=자동화모드, 0=일반모드
+            except:
+                pass
+
+            # 6. 화면 업데이트 일시 중지 (성능 향상)
+            try:
+                self.hwp.SetMessageBoxMode(0)  # 0=자동, 1=표시
+            except:
+                pass
+
             # 한글 창을 보이게 설정
             if self.hwp.XHwpWindows.Count > 0:
                 self.hwp.XHwpWindows.Item(0).Visible = True
-            
+
             self.is_initialized = True
-            logger.info("한글 COM 객체 초기화 완료")
+            logger.info("한글 COM 객체 초기화 완료 (자동화 모드 활성화)")
             return True
-            
+
         except Exception as e:
             logger.error(f"한글 COM 객체 초기화 실패: {e}")
             return False
@@ -459,10 +498,20 @@ def open_document(file_path: str) -> str:
         except:
             pass
         
-        result = hwp_controller.hwp.Open(file_path, "HWP", "forceopen:true")
-        
+        # 모든 대화상자 자동 처리: 버전 경고, 암호, 접근 권한 등
+        result = hwp_controller.hwp.Open(file_path, "HWP", "forceopen:true;versionwarning:false;suspendpassword:true")
+
         if result:
             hwp_controller.current_document = file_path
+
+            # 한글 창을 화면 제일 앞으로 가져오기
+            try:
+                hwnd = hwp_controller.hwp.XHwpWindows.Active_XHwpWindow.WindowHandle
+                win32gui.SetForegroundWindow(hwnd)
+                win32gui.ShowWindow(hwnd, 9)  # SW_RESTORE
+            except:
+                pass
+
             logger.info(f"문서 열기 완료: {file_path}")
             return f"문서를 열었습니다: {file_path}"
         else:
@@ -680,20 +729,30 @@ def find_and_replace(find_text: str, replace_text: str, replace_all: bool = Fals
     """텍스트를 찾아서 바꿉니다."""
     try:
         hwp_controller.check_initialization()
-        
-        act = hwp_controller.hwp.CreateAction("Replace")
-        pset = act.CreateSet()
-        pset.SetItem("FindString", find_text)
-        pset.SetItem("ReplaceString", replace_text)
-        pset.SetItem("ReplaceMode", 1 if replace_all else 0)
-        result = act.Execute(pset)
-        
+        hwp = hwp_controller.hwp
+
+        # 문서 시작으로 이동
+        hwp.HAction.Run("MoveDocBegin")
+
+        # HParameterSet 방식 사용
+        if replace_all:
+            hwp.HAction.GetDefault("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
+            hwp.HParameterSet.HFindReplace.FindString = find_text
+            hwp.HParameterSet.HFindReplace.ReplaceString = replace_text
+            hwp.HParameterSet.HFindReplace.ReplaceMode = 1  # 모두 바꾸기
+            result = hwp.HAction.Execute("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
+        else:
+            hwp.HAction.GetDefault("Replace", hwp.HParameterSet.HFindReplace.HSet)
+            hwp.HParameterSet.HFindReplace.FindString = find_text
+            hwp.HParameterSet.HFindReplace.ReplaceString = replace_text
+            result = hwp.HAction.Execute("Replace", hwp.HParameterSet.HFindReplace.HSet)
+
         if result:
             logger.info(f"찾기/바꾸기 완료: '{find_text}' -> '{replace_text}'")
             return f"'{find_text}'를 '{replace_text}'로 {'모두 ' if replace_all else ''}바꾸었습니다."
         else:
             return f"'{find_text}'를 찾을 수 없습니다."
-            
+
     except Exception as e:
         logger.error(f"찾기/바꾸기 실패: {e}")
         return f"찾기/바꾸기 실패: {e}"
@@ -1038,11 +1097,14 @@ def get_text_all() -> str:
     """문서 전체의 텍스트를 읽어옵니다."""
     try:
         hwp_controller.check_initialization()
-        
+
         hwp_controller.hwp.HAction.Run("SelectAll")
         text = hwp_controller.hwp.GetTextFile("TEXT", "")
         hwp_controller.hwp.HAction.Run("MoveDocBegin")
-        
+
+        if text is None:
+            text = ""
+
         logger.info(f"전체 텍스트 읽기 완료: {len(text)} 글자")
         return text
         
@@ -1055,18 +1117,20 @@ def get_text_by_page(page_number: int) -> str:
     """특정 페이지의 텍스트를 읽어옵니다."""
     try:
         hwp_controller.check_initialization()
-        
+
         hwp_controller.hwp.HAction.GetDefault("Goto", hwp_controller.hwp.HParameterSet.HGotoE.HSet)
-        hwp_controller.hwp.HParameterSet.HGotoE.HSet.SetItem("DialogResult", page_number)
-        hwp_controller.hwp.HParameterSet.HGotoE.SetItem("PageNumber", page_number)
+        hwp_controller.hwp.HParameterSet.HGotoE.PageNumber = page_number
         hwp_controller.hwp.HAction.Execute("Goto", hwp_controller.hwp.HParameterSet.HGotoE.HSet)
-        
+
         hwp_controller.hwp.HAction.Run("MovePageBegin")
         hwp_controller.hwp.HAction.Run("MoveSelPageDown")
-        
+
         text = hwp_controller.hwp.GetTextFile("TEXT", "")
         hwp_controller.hwp.HAction.Run("Cancel")
-        
+
+        if text is None:
+            text = ""
+
         logger.info(f"{page_number}페이지 텍스트 읽기 완료")
         return text
         
@@ -1079,9 +1143,12 @@ def get_selected_text() -> str:
     """현재 선택된 텍스트를 읽어옵니다."""
     try:
         hwp_controller.check_initialization()
-        
+
         text = hwp_controller.hwp.GetTextFile("TEXT", "")
-        
+
+        if text is None:
+            text = ""
+
         logger.info(f"선택된 텍스트 읽기 완료: {len(text)} 글자")
         return text
         
@@ -1094,16 +1161,19 @@ def get_paragraph_text(paragraph_index: int = 0) -> str:
     """특정 문단의 텍스트를 읽어옵니다. (0부터 시작)"""
     try:
         hwp_controller.check_initialization()
-        
+
         hwp_controller.hwp.HAction.Run("MoveDocBegin")
-        
+
         for _ in range(paragraph_index):
             hwp_controller.hwp.HAction.Run("MoveParaDown")
-        
+
         hwp_controller.hwp.HAction.Run("MoveSelParaDown")
         text = hwp_controller.hwp.GetTextFile("TEXT", "")
         hwp_controller.hwp.HAction.Run("Cancel")
-        
+
+        if text is None:
+            text = ""
+
         logger.info(f"{paragraph_index}번째 문단 텍스트 읽기 완료")
         return text.strip()
         
@@ -1180,7 +1250,10 @@ def get_table_as_csv(table_index: int = 1, output_path: Optional[str] = None) ->
             hwp.HAction.Run("TableCellBlockExtendAll")
             
             table_text = hwp.GetTextFile("TEXT", "")
-            
+
+            if table_text is None:
+                table_text = ""
+
             if table_text:
                 cell_contents = [t.strip() for t in table_text.split('\r\n') if t.strip()]
             
@@ -1255,14 +1328,12 @@ def batch_replace(replacements: str) -> str:
                 continue
             
             hwp.HAction.Run("MoveDocBegin")
-            
+
             hwp.HAction.GetDefault("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
             hwp.HParameterSet.HFindReplace.FindString = find_text
             hwp.HParameterSet.HFindReplace.ReplaceString = replace_text
-            hwp.HParameterSet.HFindReplace.IgnoreCase = 0
-            hwp.HParameterSet.HFindReplace.WholeWordOnly = 0
             hwp.HParameterSet.HFindReplace.ReplaceMode = 1
-            
+
             execute_result = hwp.HAction.Execute("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
             
             if execute_result:
@@ -1301,7 +1372,10 @@ def find_text(search_text: str, show_context: bool = True) -> str:
         hwp.HAction.Run("SelectAll")
         full_text = hwp.GetTextFile("TEXT", "")
         hwp.HAction.Run("MoveDocBegin")
-        
+
+        if full_text is None:
+            full_text = ""
+
         if not full_text:
             return "문서에 내용이 없습니다."
         
@@ -1414,8 +1488,6 @@ def fill_template(field_values: str) -> str:
                 hwp.HAction.GetDefault("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
                 hwp.HParameterSet.HFindReplace.FindString = placeholder
                 hwp.HParameterSet.HFindReplace.ReplaceString = field_value
-                hwp.HParameterSet.HFindReplace.IgnoreCase = 0
-                hwp.HParameterSet.HFindReplace.WholeWordOnly = 0
                 hwp.HParameterSet.HFindReplace.ReplaceMode = 1
                 
                 execute_result = hwp.HAction.Execute("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
@@ -1473,7 +1545,10 @@ def get_document_structure() -> str:
         hwp.HAction.Run("SelectAll")
         full_text = hwp.GetTextFile("TEXT", "")
         hwp.HAction.Run("MoveDocBegin")
-        
+
+        if full_text is None:
+            full_text = ""
+
         char_count = len(full_text.replace('\r\n', '').replace(' ', '')) if full_text else 0
         paragraph_count = full_text.count('\r\n') + 1 if full_text else 0
         
@@ -1555,6 +1630,836 @@ def get_document_structure() -> str:
     except Exception as e:
         logger.error(f"문서 구조 분석 실패: {e}")
         return f"문서 구조 분석 실패: {e}"
+
+
+# ============================================================
+# 개선된 위치 제어 및 편집 기능
+# ============================================================
+
+@mcp.tool()
+def move_to_page(page_number: int) -> str:
+    """
+    특정 페이지로 커서를 이동합니다.
+    page_number: 이동할 페이지 번호 (1부터 시작)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        total_pages = hwp.PageCount
+        if page_number < 1 or page_number > total_pages:
+            return f"페이지 번호가 범위를 벗어났습니다. (1~{total_pages})"
+
+        hwp.HAction.GetDefault("Goto", hwp.HParameterSet.HGotoE.HSet)
+        hwp.HParameterSet.HGotoE.PageNumber = page_number
+        hwp.HAction.Execute("Goto", hwp.HParameterSet.HGotoE.HSet)
+
+        logger.info(f"{page_number}페이지로 이동 완료")
+        return f"{page_number}페이지로 이동했습니다."
+
+    except Exception as e:
+        logger.error(f"페이지 이동 실패: {e}")
+        return f"페이지 이동 실패: {e}"
+
+
+@mcp.tool()
+def move_to_paragraph_number(paragraph_number: int) -> str:
+    """
+    특정 문단으로 커서를 이동합니다. (0부터 시작)
+    paragraph_number: 이동할 문단 번호
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        hwp.HAction.Run("MoveDocBegin")
+
+        for i in range(paragraph_number):
+            hwp.HAction.Run("MoveParaDown")
+
+        logger.info(f"{paragraph_number}번째 문단으로 이동 완료")
+        return f"{paragraph_number}번째 문단으로 이동했습니다."
+
+    except Exception as e:
+        logger.error(f"문단 이동 실패: {e}")
+        return f"문단 이동 실패: {e}"
+
+
+@mcp.tool()
+def move_to_document_end() -> str:
+    """문서의 끝으로 커서를 이동합니다."""
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        hwp.HAction.Run("MoveDocEnd")
+
+        logger.info("문서 끝으로 이동 완료")
+        return "문서 끝으로 이동했습니다."
+
+    except Exception as e:
+        logger.error(f"문서 끝 이동 실패: {e}")
+        return f"문서 끝 이동 실패: {e}"
+
+
+@mcp.tool()
+def move_to_document_start() -> str:
+    """문서의 시작으로 커서를 이동합니다."""
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        hwp.HAction.Run("MoveDocBegin")
+
+        logger.info("문서 시작으로 이동 완료")
+        return "문서 시작으로 이동했습니다."
+
+    except Exception as e:
+        logger.error(f"문서 시작 이동 실패: {e}")
+        return f"문서 시작 이동 실패: {e}"
+
+
+# ============================================================
+# 텍스트 삭제 기능
+# ============================================================
+
+@mcp.tool()
+def delete_selected_text() -> str:
+    """현재 선택된 텍스트를 삭제합니다."""
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 선택된 텍스트 확인
+        selected_text = hwp.GetTextFile("TEXT", "")
+        if selected_text is None:
+            selected_text = ""
+
+        if not selected_text:
+            return "선택된 텍스트가 없습니다."
+
+        # Delete 키 실행
+        hwp.HAction.Run("Delete")
+
+        logger.info(f"선택된 텍스트 삭제 완료: {len(selected_text)}자")
+        return f"선택된 텍스트를 삭제했습니다. ({len(selected_text)}자)"
+
+    except Exception as e:
+        logger.error(f"선택 텍스트 삭제 실패: {e}")
+        return f"선택 텍스트 삭제 실패: {e}"
+
+
+@mcp.tool()
+def delete_all_occurrences(text: str) -> str:
+    """
+    문서에서 특정 텍스트를 모두 찾아서 삭제합니다.
+    text: 삭제할 텍스트
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        if not text:
+            return "삭제할 텍스트를 지정해주세요."
+
+        # find_and_replace의 로직을 사용하여 모두 삭제
+        hwp.HAction.Run("MoveDocBegin")
+
+        hwp.HAction.GetDefault("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
+        hwp.HParameterSet.HFindReplace.FindString = text
+        hwp.HParameterSet.HFindReplace.ReplaceString = ""
+        hwp.HParameterSet.HFindReplace.ReplaceMode = 1  # 모두 바꾸기
+
+        result = hwp.HAction.Execute("AllReplace", hwp.HParameterSet.HFindReplace.HSet)
+
+        if result:
+            logger.info(f"'{text}' 모두 삭제 완료")
+            return f"'{text}'를 모두 삭제했습니다."
+        else:
+            return f"'{text}'를 찾을 수 없습니다."
+
+    except Exception as e:
+        logger.error(f"텍스트 삭제 실패: {e}")
+        return f"텍스트 삭제 실패: {e}"
+
+
+@mcp.tool()
+def delete_current_line() -> str:
+    """현재 커서가 있는 줄 전체를 삭제합니다."""
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 줄 시작으로 이동
+        hwp.HAction.Run("MoveLineBegin")
+        # 줄 끝까지 선택
+        hwp.HAction.Run("MoveSelLineEnd")
+        # 삭제
+        hwp.HAction.Run("Delete")
+        # 줄바꿈도 삭제 (다음 줄과 합쳐짐)
+        hwp.HAction.Run("Delete")
+
+        logger.info("현재 줄 삭제 완료")
+        return f"현재 줄을 삭제했습니다."
+
+    except Exception as e:
+        logger.error(f"줄 삭제 실패: {e}")
+        return f"줄 삭제 실패: {e}"
+
+
+@mcp.tool()
+def delete_current_paragraph() -> str:
+    """현재 커서가 있는 문단 전체를 삭제합니다."""
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 문단 선택
+        hwp.HAction.Run("MoveSelParaDown")
+        # 삭제
+        hwp.HAction.Run("Delete")
+
+        logger.info("현재 문단 삭제 완료")
+        return "현재 문단을 삭제했습니다."
+
+    except Exception as e:
+        logger.error(f"문단 삭제 실패: {e}")
+        return f"문단 삭제 실패: {e}"
+
+
+@mcp.tool()
+def delete_page_content(page_number: int) -> str:
+    """
+    특정 페이지의 모든 내용을 삭제합니다.
+    page_number: 삭제할 페이지 번호 (1부터 시작)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        total_pages = hwp.PageCount
+        if page_number < 1 or page_number > total_pages:
+            return f"페이지 번호가 범위를 벗어났습니다. (1~{total_pages})"
+
+        # 페이지로 이동
+        hwp.HAction.GetDefault("Goto", hwp.HParameterSet.HGotoE.HSet)
+        hwp.HParameterSet.HGotoE.PageNumber = page_number
+        hwp.HAction.Execute("Goto", hwp.HParameterSet.HGotoE.HSet)
+
+        # 페이지 시작으로 이동
+        hwp.HAction.Run("MovePageBegin")
+        # 페이지 전체 선택
+        hwp.HAction.Run("MoveSelPageDown")
+        # 삭제
+        hwp.HAction.Run("Delete")
+
+        logger.info(f"{page_number}페이지 내용 삭제 완료")
+        return f"{page_number}페이지의 내용을 삭제했습니다."
+
+    except Exception as e:
+        logger.error(f"페이지 삭제 실패: {e}")
+        return f"페이지 삭제 실패: {e}"
+
+
+# ============================================================
+# 서식 유지 및 가져오기 기능
+# ============================================================
+
+@mcp.tool()
+def get_current_char_shape() -> str:
+    """
+    현재 커서 위치의 글자 서식 정보를 가져옵니다.
+    (글꼴, 크기, 굵기, 기울임, 밑줄, 색상 등)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # CharShape 정보 가져오기
+        pset = hwp.HParameterSet.HCharShape
+        hwp.HAction.GetDefault("CharShape", pset.HSet)
+
+        # 서식 정보 추출 (직접 속성 접근)
+        try:
+            font_name = pset.FaceNameHangul if hasattr(pset, 'FaceNameHangul') and pset.FaceNameHangul else "알 수 없음"
+        except:
+            font_name = "알 수 없음"
+
+        try:
+            font_size = pset.Height // 100 if hasattr(pset, 'Height') and pset.Height else 0
+        except:
+            font_size = 0
+
+        try:
+            is_bold = bool(pset.Bold) if hasattr(pset, 'Bold') else False
+        except:
+            is_bold = False
+
+        try:
+            is_italic = bool(pset.Italic) if hasattr(pset, 'Italic') else False
+        except:
+            is_italic = False
+
+        try:
+            is_underline = bool(pset.Underline) if hasattr(pset, 'Underline') else False
+        except:
+            is_underline = False
+
+        try:
+            text_color = pset.TextColor if hasattr(pset, 'TextColor') else 0x000000
+        except:
+            text_color = 0x000000
+
+        # 색상을 RGB로 변환
+        r = text_color & 0xFF
+        g = (text_color >> 8) & 0xFF
+        b = (text_color >> 16) & 0xFF
+
+        result = f"""현재 위치의 글자 서식:
+- 글꼴: {font_name}
+- 크기: {font_size}pt
+- 굵게: {'예' if is_bold else '아니오'}
+- 기울임: {'예' if is_italic else '아니오'}
+- 밑줄: {'예' if is_underline else '아니오'}
+- 색상: RGB({r}, {g}, {b})"""
+
+        logger.info("글자 서식 정보 조회 완료")
+        return result
+
+    except Exception as e:
+        logger.error(f"서식 정보 조회 실패: {e}")
+        return f"서식 정보 조회 실패: {e}"
+
+
+@mcp.tool()
+def insert_text_preserving_format(text: str) -> str:
+    """
+    현재 위치의 서식을 유지하면서 텍스트를 삽입합니다.
+    한글의 기본 동작이 서식을 유지하므로, 단순 삽입으로 동작합니다.
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 한글은 기본적으로 현재 위치의 서식을 유지하면서 텍스트를 삽입함
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", text)
+        act.Execute(pset)
+
+        logger.info(f"서식 유지 텍스트 삽입 완료: {text[:50]}...")
+        return f"서식을 유지하면서 텍스트를 삽입했습니다: {text[:50]}..."
+
+    except Exception as e:
+        logger.error(f"서식 유지 삽입 실패: {e}")
+        return f"서식 유지 삽입 실패: {e}"
+
+
+# ============================================================
+# 고급 삽입 기능 (특정 위치에 삽입)
+# ============================================================
+
+@mcp.tool()
+def insert_after_text(search_text: str, new_text: str, nth_occurrence: int = 1) -> str:
+    """
+    특정 텍스트를 찾아서 그 뒤에 새 텍스트를 삽입합니다.
+    search_text: 찾을 텍스트
+    new_text: 삽입할 텍스트
+    nth_occurrence: 몇 번째 발견된 텍스트 뒤에 삽입할지 (1부터 시작, 기본값 1)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        if not search_text:
+            return "찾을 텍스트를 지정해주세요."
+
+        # 문서 시작으로 이동
+        hwp.HAction.Run("MoveDocBegin")
+
+        # n번째 발견까지 반복 검색
+        found_count = 0
+        for i in range(nth_occurrence):
+            hwp.HAction.GetDefault("RepeatFind", hwp.HParameterSet.HFindReplace.HSet)
+            hwp.HParameterSet.HFindReplace.FindString = search_text
+
+            result = hwp.HAction.Execute("RepeatFind", hwp.HParameterSet.HFindReplace.HSet)
+
+            if not result:
+                if i == 0:
+                    return f"'{search_text}'를 찾을 수 없습니다."
+                else:
+                    return f"'{search_text}'를 {i}번만 찾았습니다. ({nth_occurrence}번째를 요청했으나 존재하지 않음)"
+
+            found_count = i + 1
+
+        # 찾은 텍스트의 끝으로 이동 (선택 영역의 오른쪽)
+        hwp.HAction.Run("MoveSelRight")
+
+        # 새 텍스트 삽입
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", new_text)
+        act.Execute(pset)
+
+        logger.info(f"'{search_text}' ({nth_occurrence}번째) 뒤에 '{new_text}' 삽입 완료")
+        return f"'{search_text}' ({nth_occurrence}번째) 뒤에 '{new_text}'를 삽입했습니다."
+
+    except Exception as e:
+        logger.error(f"텍스트 뒤 삽입 실패: {e}")
+        return f"텍스트 뒤 삽입 실패: {e}"
+
+
+@mcp.tool()
+def insert_before_text(search_text: str, new_text: str, nth_occurrence: int = 1) -> str:
+    """
+    특정 텍스트를 찾아서 그 앞에 새 텍스트를 삽입합니다.
+    search_text: 찾을 텍스트
+    new_text: 삽입할 텍스트
+    nth_occurrence: 몇 번째 발견된 텍스트 앞에 삽입할지 (1부터 시작, 기본값 1)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        if not search_text:
+            return "찾을 텍스트를 지정해주세요."
+
+        # 문서 시작으로 이동
+        hwp.HAction.Run("MoveDocBegin")
+
+        # n번째 발견까지 반복 검색
+        found_count = 0
+        for i in range(nth_occurrence):
+            hwp.HAction.GetDefault("RepeatFind", hwp.HParameterSet.HFindReplace.HSet)
+            hwp.HParameterSet.HFindReplace.FindString = search_text
+
+            result = hwp.HAction.Execute("RepeatFind", hwp.HParameterSet.HFindReplace.HSet)
+
+            if not result:
+                if i == 0:
+                    return f"'{search_text}'를 찾을 수 없습니다."
+                else:
+                    return f"'{search_text}'를 {i}번만 찾았습니다. ({nth_occurrence}번째를 요청했으나 존재하지 않음)"
+
+            found_count = i + 1
+
+        # 찾은 텍스트의 시작으로 이동 (선택 영역의 왼쪽)
+        hwp.HAction.Run("MoveSelLeft")
+
+        # 새 텍스트 삽입
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", new_text)
+        act.Execute(pset)
+
+        logger.info(f"'{search_text}' ({nth_occurrence}번째) 앞에 '{new_text}' 삽입 완료")
+        return f"'{search_text}' ({nth_occurrence}번째) 앞에 '{new_text}'를 삽입했습니다."
+
+    except Exception as e:
+        logger.error(f"텍스트 앞 삽입 실패: {e}")
+        return f"텍스트 앞 삽입 실패: {e}"
+
+
+@mcp.tool()
+def append_to_paragraph(paragraph_number: int, text: str) -> str:
+    """
+    특정 문단의 끝에 텍스트를 추가합니다.
+    paragraph_number: 문단 번호 (0부터 시작)
+    text: 추가할 텍스트
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 문단으로 이동
+        hwp.HAction.Run("MoveDocBegin")
+        for i in range(paragraph_number):
+            hwp.HAction.Run("MoveParaDown")
+
+        # 문단 끝으로 이동
+        hwp.HAction.Run("MoveParaEnd")
+
+        # 텍스트 삽입
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", text)
+        act.Execute(pset)
+
+        logger.info(f"{paragraph_number}번째 문단 끝에 텍스트 추가 완료")
+        return f"{paragraph_number}번째 문단 끝에 '{text[:30]}...'를 추가했습니다."
+
+    except Exception as e:
+        logger.error(f"문단 끝 추가 실패: {e}")
+        return f"문단 끝 추가 실패: {e}"
+
+
+@mcp.tool()
+def prepend_to_paragraph(paragraph_number: int, text: str) -> str:
+    """
+    특정 문단의 앞에 텍스트를 추가합니다.
+    paragraph_number: 문단 번호 (0부터 시작)
+    text: 추가할 텍스트
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 문단으로 이동
+        hwp.HAction.Run("MoveDocBegin")
+        for i in range(paragraph_number):
+            hwp.HAction.Run("MoveParaDown")
+
+        # 문단 시작으로 이동 (이미 시작 위치)
+        # 텍스트 삽입
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", text)
+        act.Execute(pset)
+
+        logger.info(f"{paragraph_number}번째 문단 앞에 텍스트 추가 완료")
+        return f"{paragraph_number}번째 문단 앞에 '{text[:30]}...'를 추가했습니다."
+
+    except Exception as e:
+        logger.error(f"문단 앞 추가 실패: {e}")
+        return f"문단 앞 추가 실패: {e}"
+
+
+@mcp.tool()
+def insert_at_page_start(page_number: int, text: str) -> str:
+    """
+    특정 페이지의 시작 부분에 텍스트를 삽입합니다.
+    page_number: 페이지 번호 (1부터 시작)
+    text: 삽입할 텍스트
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        total_pages = hwp.PageCount
+        if page_number < 1 or page_number > total_pages:
+            return f"페이지 번호가 범위를 벗어났습니다. (1~{total_pages})"
+
+        # 페이지로 이동
+        hwp.HAction.GetDefault("Goto", hwp.HParameterSet.HGotoE.HSet)
+        hwp.HParameterSet.HGotoE.PageNumber = page_number
+        hwp.HAction.Execute("Goto", hwp.HParameterSet.HGotoE.HSet)
+
+        # 페이지 시작으로 이동
+        hwp.HAction.Run("MovePageBegin")
+
+        # 텍스트 삽입
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", text)
+        act.Execute(pset)
+
+        logger.info(f"{page_number}페이지 시작에 텍스트 삽입 완료")
+        return f"{page_number}페이지 시작에 '{text[:30]}...'를 삽입했습니다."
+
+    except Exception as e:
+        logger.error(f"페이지 시작 삽입 실패: {e}")
+        return f"페이지 시작 삽입 실패: {e}"
+
+
+@mcp.tool()
+def insert_at_page_end(page_number: int, text: str) -> str:
+    """
+    특정 페이지의 끝 부분에 텍스트를 삽입합니다.
+    page_number: 페이지 번호 (1부터 시작)
+    text: 삽입할 텍스트
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        total_pages = hwp.PageCount
+        if page_number < 1 or page_number > total_pages:
+            return f"페이지 번호가 범위를 벗어났습니다. (1~{total_pages})"
+
+        # 페이지로 이동
+        hwp.HAction.GetDefault("Goto", hwp.HParameterSet.HGotoE.HSet)
+        hwp.HParameterSet.HGotoE.PageNumber = page_number
+        hwp.HAction.Execute("Goto", hwp.HParameterSet.HGotoE.HSet)
+
+        # 페이지 끝으로 이동
+        hwp.HAction.Run("MovePageEnd")
+
+        # 텍스트 삽입
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", text)
+        act.Execute(pset)
+
+        logger.info(f"{page_number}페이지 끝에 텍스트 삽입 완료")
+        return f"{page_number}페이지 끝에 '{text[:30]}...'를 삽입했습니다."
+
+    except Exception as e:
+        logger.error(f"페이지 끝 삽입 실패: {e}")
+        return f"페이지 끝 삽입 실패: {e}"
+
+
+# ============================================================
+# 선택 기능
+# ============================================================
+
+@mcp.tool()
+def select_paragraph_by_number(paragraph_number: int) -> str:
+    """
+    특정 문단을 선택합니다.
+    paragraph_number: 선택할 문단 번호 (0부터 시작)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 문단으로 이동
+        hwp.HAction.Run("MoveDocBegin")
+        for i in range(paragraph_number):
+            hwp.HAction.Run("MoveParaDown")
+
+        # 문단 선택
+        hwp.HAction.Run("MoveSelParaDown")
+
+        # 선택된 내용 확인
+        selected_text = hwp.GetTextFile("TEXT", "")
+        if selected_text is None:
+            selected_text = ""
+
+        logger.info(f"{paragraph_number}번째 문단 선택 완료")
+        return f"{paragraph_number}번째 문단을 선택했습니다. ({len(selected_text)}자)"
+
+    except Exception as e:
+        logger.error(f"문단 선택 실패: {e}")
+        return f"문단 선택 실패: {e}"
+
+
+@mcp.tool()
+def select_page_content(page_number: int) -> str:
+    """
+    특정 페이지의 모든 내용을 선택합니다.
+    page_number: 선택할 페이지 번호 (1부터 시작)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        total_pages = hwp.PageCount
+        if page_number < 1 or page_number > total_pages:
+            return f"페이지 번호가 범위를 벗어났습니다. (1~{total_pages})"
+
+        # 페이지로 이동
+        hwp.HAction.GetDefault("Goto", hwp.HParameterSet.HGotoE.HSet)
+        hwp.HParameterSet.HGotoE.PageNumber = page_number
+        hwp.HAction.Execute("Goto", hwp.HParameterSet.HGotoE.HSet)
+
+        # 페이지 시작으로 이동
+        hwp.HAction.Run("MovePageBegin")
+        # 페이지 전체 선택
+        hwp.HAction.Run("MoveSelPageDown")
+
+        # 선택된 내용 확인
+        selected_text = hwp.GetTextFile("TEXT", "")
+        if selected_text is None:
+            selected_text = ""
+
+        logger.info(f"{page_number}페이지 선택 완료")
+        return f"{page_number}페이지를 선택했습니다. ({len(selected_text)}자)"
+
+    except Exception as e:
+        logger.error(f"페이지 선택 실패: {e}")
+        return f"페이지 선택 실패: {e}"
+
+
+# ============================================================
+# 성능 최적화 및 자동화 제어
+# ============================================================
+
+@mcp.tool()
+def set_screen_updating(enabled: bool = True) -> str:
+    """
+    화면 업데이트를 켜거나 끕니다.
+    대량 작업 시 False로 설정하면 성능이 크게 향상됩니다.
+    작업 완료 후 반드시 True로 되돌려야 합니다.
+
+    enabled: True=화면 업데이트 켜기, False=화면 업데이트 끄기
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        if enabled:
+            hwp.SetScreenUpdate(1)  # 화면 업데이트 켜기
+            logger.info("화면 업데이트 활성화")
+            return "화면 업데이트를 활성화했습니다. (정상 속도)"
+        else:
+            hwp.SetScreenUpdate(0)  # 화면 업데이트 끄기
+            logger.info("화면 업데이트 비활성화")
+            return "화면 업데이트를 비활성화했습니다. (고속 모드)"
+
+    except Exception as e:
+        logger.error(f"화면 업데이트 설정 실패: {e}")
+        return f"화면 업데이트 설정 실패: {e}"
+
+
+@mcp.tool()
+def set_automation_mode(enabled: bool = True) -> str:
+    """
+    자동화 모드를 켜거나 끕니다.
+    enabled=True이면 모든 확인 대화상자가 자동으로 승인됩니다.
+
+    enabled: True=자동화 모드 (대화상자 없음), False=일반 모드 (대화상자 표시)
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        if enabled:
+            # 자동화 모드 활성화
+            try:
+                hwp.MessageBoxMode = 0  # 0=자동응답
+            except:
+                pass
+            try:
+                hwp.SetMessageBoxMode(0)
+            except:
+                pass
+            logger.info("자동화 모드 활성화")
+            return "자동화 모드를 활성화했습니다. (모든 확인창 자동 승인)"
+        else:
+            # 일반 모드로 전환
+            try:
+                hwp.MessageBoxMode = 1  # 1=대화상자표시
+            except:
+                pass
+            try:
+                hwp.SetMessageBoxMode(1)
+            except:
+                pass
+            logger.info("일반 모드 활성화")
+            return "일반 모드로 전환했습니다. (확인창 표시)"
+
+    except Exception as e:
+        logger.error(f"자동화 모드 설정 실패: {e}")
+        return f"자동화 모드 설정 실패: {e}"
+
+
+@mcp.tool()
+def optimize_for_bulk_operations() -> str:
+    """
+    대량 작업을 위한 최적화 설정을 적용합니다.
+    - 화면 업데이트 비활성화
+    - 자동화 모드 활성화
+    - 성능 최대화
+
+    작업 완료 후 restore_normal_mode()를 호출하세요.
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 화면 업데이트 끄기
+        try:
+            hwp.SetScreenUpdate(0)
+        except:
+            pass
+
+        # 자동화 모드 켜기
+        try:
+            hwp.MessageBoxMode = 0
+        except:
+            pass
+
+        # 자동 저장 비활성화 (성능 향상)
+        try:
+            hwp.SetAutoSave(0)
+        except:
+            pass
+
+        logger.info("대량 작업 최적화 모드 활성화")
+        return "대량 작업 최적화 모드를 활성화했습니다. (최고 성능)\n작업 완료 후 restore_normal_mode()를 호출하세요."
+
+    except Exception as e:
+        logger.error(f"최적화 모드 설정 실패: {e}")
+        return f"최적화 모드 설정 실패: {e}"
+
+
+@mcp.tool()
+def restore_normal_mode() -> str:
+    """
+    최적화 설정을 해제하고 일반 모드로 복원합니다.
+    - 화면 업데이트 활성화
+    - 자동 저장 활성화
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 화면 업데이트 켜기
+        try:
+            hwp.SetScreenUpdate(1)
+        except:
+            pass
+
+        # 자동 저장 켜기
+        try:
+            hwp.SetAutoSave(1)
+        except:
+            pass
+
+        # 화면 갱신
+        try:
+            hwp.Run("Repaginate")
+        except:
+            pass
+
+        logger.info("일반 모드 복원 완료")
+        return "일반 모드로 복원했습니다. (화면 업데이트 활성화)"
+
+    except Exception as e:
+        logger.error(f"일반 모드 복원 실패: {e}")
+        return f"일반 모드 복원 실패: {e}"
+
+
+@mcp.tool()
+def replace_paragraph(paragraph_number: int, new_text: str) -> str:
+    """
+    특정 문단의 내용을 완전히 새 텍스트로 교체합니다.
+    paragraph_number: 교체할 문단 번호 (0부터 시작)
+    new_text: 새로운 텍스트
+    """
+    try:
+        hwp_controller.check_initialization()
+        hwp = hwp_controller.hwp
+
+        # 문단으로 이동
+        hwp.HAction.Run("MoveDocBegin")
+        for i in range(paragraph_number):
+            hwp.HAction.Run("MoveParaDown")
+
+        # 문단 선택
+        hwp.HAction.Run("MoveSelParaDown")
+
+        # 기존 내용 확인
+        old_text = hwp.GetTextFile("TEXT", "")
+        if old_text is None:
+            old_text = ""
+
+        # 삭제
+        hwp.HAction.Run("Delete")
+
+        # 새 텍스트 삽입
+        act = hwp.CreateAction("InsertText")
+        pset = act.CreateSet()
+        pset.SetItem("Text", new_text)
+        act.Execute(pset)
+
+        logger.info(f"{paragraph_number}번째 문단 교체 완료")
+        return f"{paragraph_number}번째 문단을 교체했습니다.\n이전: {old_text[:50] if old_text else '(빈 문단)'}...\n새 내용: {new_text[:50]}..."
+
+    except Exception as e:
+        logger.error(f"문단 교체 실패: {e}")
+        return f"문단 교체 실패: {e}"
 
 
 def main():
